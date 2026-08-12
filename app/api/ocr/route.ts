@@ -40,7 +40,10 @@ export async function POST(request: NextRequest) {
     const supabase = createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: "Your session expired. Please log in again." },
+        { status: 401 }
+      );
     }
 
     const formData = await request.formData();
@@ -57,15 +60,38 @@ export async function POST(request: NextRequest) {
       model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
     });
 
-    const result = await model.generateContent([
-      EXTRACTION_PROMPT,
-      {
-        inlineData: {
-          mimeType: image.type || "image/jpeg",
-          data: base64,
+    let result;
+    try {
+      result = await model.generateContent([
+        EXTRACTION_PROMPT,
+        {
+          inlineData: {
+            mimeType: image.type || "image/jpeg",
+            data: base64,
+          },
         },
-      },
-    ]);
+      ]);
+    } catch (apiErr: any) {
+      console.error("Gemini API error:", apiErr);
+
+      const status = apiErr?.status || apiErr?.response?.status;
+      if (status === 429) {
+        return NextResponse.json(
+          { error: "You've hit the free scan limit for right now. Wait a minute and try again, or add this one manually." },
+          { status: 429 }
+        );
+      }
+      if (status === 400 || status === 415) {
+        return NextResponse.json(
+          { error: "That image couldn't be processed. Try a different photo." },
+          { status: 415 }
+        );
+      }
+      return NextResponse.json(
+        { error: "Couldn't reach the scanning service. Check your connection and try again." },
+        { status: 502 }
+      );
+    }
 
     const text = result.response.text().trim();
     const cleaned = text.replace(/```json|```/g, "").trim();
@@ -75,7 +101,7 @@ export async function POST(request: NextRequest) {
       parsed = JSON.parse(cleaned);
     } catch {
       return NextResponse.json(
-        { error: "Could not parse receipt data" },
+        { error: "Couldn't read that clearly. Try a clearer, well-lit photo, or add it manually instead." },
         { status: 502 }
       );
     }
@@ -123,7 +149,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     console.error("OCR error:", err);
     return NextResponse.json(
-      { error: "Failed to process receipt" },
+      { error: "Something went wrong on our end. Please try again." },
       { status: 500 }
     );
   }

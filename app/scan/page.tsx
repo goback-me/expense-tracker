@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { normalizeToJpeg } from "@/lib/image";
 
 export default function ScanPage() {
   const router = useRouter();
@@ -56,7 +57,15 @@ export default function ScanPage() {
 
     canvas.toBlob(
       async (blob) => {
-        if (blob) await processImage(blob);
+        if (!blob) return;
+        setProcessing(true);
+        try {
+          const resized = await normalizeToJpeg(blob);
+          await processImage(resized);
+        } catch (err: any) {
+          setProcessing(false);
+          alert(err?.message || "Couldn't process that photo. Try again.");
+        }
       },
       "image/jpeg",
       0.9
@@ -76,13 +85,28 @@ export default function ScanPage() {
       return;
     }
 
-    const MAX_SIZE_MB = 15;
+    const MAX_SIZE_MB = 25;
     if (file.size > MAX_SIZE_MB * 1024 * 1024) {
       alert(`That image is too large (max ${MAX_SIZE_MB}MB). Try a smaller photo.`);
       return;
     }
 
-    await processImage(file);
+    setProcessing(true);
+
+    // Normalize first — this converts HEIC (common on iPhone galleries) and
+    // any oversized photo into a consistent JPEG before we ever hit the API,
+    // so format/size issues get caught here with a clear message instead of
+    // showing up as a confusing OCR failure later.
+    let normalized: Blob;
+    try {
+      normalized = await normalizeToJpeg(file);
+    } catch (err: any) {
+      setProcessing(false);
+      alert(err?.message || "Couldn't process that image. Try a different photo.");
+      return;
+    }
+
+    await processImage(normalized);
   }
 
   async function processImage(blob: Blob) {
@@ -97,9 +121,13 @@ export default function ScanPage() {
         body: formData,
       });
 
-      if (!res.ok) throw new Error("OCR failed");
+      const data = await res.json().catch(() => null);
 
-      const data = await res.json();
+      if (!res.ok) {
+        // Show the server's actual reason instead of a generic guess.
+        const message = data?.error || `Something went wrong (error ${res.status}).`;
+        throw new Error(message);
+      }
 
       // Store extracted data + image in sessionStorage to pass to confirm screen
       const imageUrl = URL.createObjectURL(blob);
@@ -107,8 +135,11 @@ export default function ScanPage() {
       sessionStorage.setItem("receiptImagePreview", imageUrl);
 
       router.push("/receipts/new");
-    } catch (err) {
-      alert("Couldn't read that receipt. Try again with better lighting.");
+    } catch (err: any) {
+      const message =
+        err?.message ||
+        "Couldn't reach the scanning service. Check your connection and try again.";
+      alert(message);
       setProcessing(false);
     }
   }

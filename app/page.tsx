@@ -145,12 +145,35 @@ export default async function HomePage() {
               Income
             </span>
           </Link>
+          <Link href="/receipts/import" className="group flex flex-col items-center gap-2 active:scale-95 transition-transform">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full border border-outline-variant bg-surface shadow-sm transition-colors group-active:bg-sage/10 group-active:border-sage">
+              <span className="material-symbols-outlined transition-colors group-active:text-secondary">sms</span>
+            </div>
+            <span className="text-center text-xs font-semibold text-on-surface-variant">
+              Import
+              <br />
+              SMS/Statement
+            </span>
+          </Link>
+        </section>
+
+        <section className="mb-lg grid grid-cols-4 gap-3">
           <Link href="/reports" className="group flex flex-col items-center gap-2 active:scale-95 transition-transform">
             <div className="flex h-14 w-14 items-center justify-center rounded-full border border-outline-variant bg-surface shadow-sm transition-colors group-active:bg-sage/10 group-active:border-sage">
               <span className="material-symbols-outlined transition-colors group-active:text-secondary">bar_chart</span>
             </div>
             <span className="text-center text-xs font-semibold text-on-surface-variant">
               Reports
+            </span>
+          </Link>
+          <Link href="/receipts" className="group flex flex-col items-center gap-2 active:scale-95 transition-transform">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full border border-outline-variant bg-surface shadow-sm transition-colors group-active:bg-sage/10 group-active:border-sage">
+              <span className="material-symbols-outlined transition-colors group-active:text-secondary">receipt_long</span>
+            </div>
+            <span className="text-center text-xs font-semibold text-on-surface-variant">
+              All
+              <br />
+              Receipts
             </span>
           </Link>
         </section>
