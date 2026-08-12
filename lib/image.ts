@@ -1,11 +1,16 @@
 /**
- * Converts any browser-loadable image (including HEIC photos from an iPhone
- * gallery) into a resized JPEG blob. Two problems this solves:
+ * Converts any selected image into a resized JPEG blob, ready to send to the
+ * OCR API. Two problems this solves:
  *
- * 1. HEIC/HEIF compatibility — decoding happens via a native <img> tag,
- *    which uses the OS/browser's own image codecs, then we redraw to a
- *    canvas and re-encode as JPEG. This works even on browsers that can
- *    display a HEIC file but wouldn't otherwise send it anywhere reliably.
+ * 1. HEIC/HEIF compatibility. Chrome cannot decode HEIC/HEIF through an
+ *    <img> tag on ANY platform — Windows, macOS, Linux, or Android — this is
+ *    a long-standing, permanently unfixed Chromium limitation (tracked and
+ *    marked "Won't Fix" upstream), not something specific to this app or a
+ *    particular phone. Many Android photos, and virtually all photos shared
+ *    from an iPhone, are HEIC. So: try the fast native <img> decode first
+ *    (works for JPEG/PNG/WebP/AVIF in every browser), and only if that fails
+ *    fall back to a WASM-based HEIC decoder (heic2any) that doesn't depend
+ *    on the browser's own image codec at all.
  * 2. File size — phone camera photos are routinely 8-20MB. Downscaling to a
  *    sane max dimension before uploading makes scans noticeably faster and
  *    less likely to hit any request size limit.
@@ -15,6 +20,25 @@ export async function normalizeToJpeg(
   maxDimension = 1600,
   quality = 0.85
 ): Promise<Blob> {
+  try {
+    return await drawToJpeg(blob, maxDimension, quality);
+  } catch {
+    // Native decode failed — most likely HEIC/HEIF. Fall back to a WASM
+    // decoder that works regardless of what the browser itself supports.
+    try {
+      const heic2any = (await import("heic2any")).default;
+      const converted = await heic2any({ blob, toType: "image/jpeg", quality });
+      const convertedBlob = Array.isArray(converted) ? converted[0] : converted;
+      return await drawToJpeg(convertedBlob, maxDimension, quality);
+    } catch {
+      throw new Error(
+        "Couldn't read that image file — it may be corrupted or in an unsupported format."
+      );
+    }
+  }
+}
+
+async function drawToJpeg(blob: Blob, maxDimension: number, quality: number): Promise<Blob> {
   const objectUrl = URL.createObjectURL(blob);
 
   try {
@@ -23,8 +47,7 @@ export async function normalizeToJpeg(
 
     await new Promise<void>((resolve, reject) => {
       img.onload = () => resolve();
-      img.onerror = () =>
-        reject(new Error("Couldn't read that image file — it may be corrupted or in an unsupported format."));
+      img.onerror = () => reject(new Error("Native decode failed"));
     });
 
     let { naturalWidth: width, naturalHeight: height } = img;
@@ -55,7 +78,7 @@ export async function normalizeToJpeg(
     );
 
     if (!result) {
-      throw new Error("Couldn't process that image. Try a different photo.");
+      throw new Error("Couldn't process that image.");
     }
 
     return result;

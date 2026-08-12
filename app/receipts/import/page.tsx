@@ -5,6 +5,11 @@ import { useRouter } from "next/navigation";
 import TopBar from "@/components/TopBar";
 import { createClient } from "@/lib/supabase/client";
 import { normalizeToJpeg } from "@/lib/image";
+import {
+  renderPdfPagesToImages,
+  PdfPasswordRequiredError,
+  PdfPasswordIncorrectError,
+} from "@/lib/pdf";
 import { getCurrencySymbol, DEFAULT_CURRENCY } from "@/lib/currency";
 
 type Mode = "sms" | "statement";
@@ -34,6 +39,11 @@ export default function ImportPage() {
   const [transactions, setTransactions] = useState<StatementTxn[] | null>(null);
   const [importing, setImporting] = useState(false);
   const [currencySymbol, setCurrencySymbol] = useState(getCurrencySymbol(DEFAULT_CURRENCY));
+
+  // Password-protected PDF state
+  const [pendingPdf, setPendingPdf] = useState<File | null>(null);
+  const [pdfPassword, setPdfPassword] = useState("");
+  const [pdfPasswordError, setPdfPasswordError] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
@@ -84,16 +94,59 @@ export default function ImportPage() {
     setTransactions(null);
 
     try {
-      let toUpload: Blob = file;
-
-      // Normalize images (handles HEIC, downsizes large photos) — PDFs are
-      // sent as-is since canvas can't process them.
-      if (!isPdf) {
-        toUpload = await normalizeToJpeg(file);
+      if (isPdf) {
+        await processPdf(file);
+      } else {
+        const normalized = await normalizeToJpeg(file);
+        await uploadPagesForOcr([normalized]);
       }
+    } catch (err: any) {
+      alert(err?.message || "Couldn't read that statement. Try again.");
+      setStatementLoading(false);
+    }
+  }
 
+  async function processPdf(file: File, password?: string) {
+    try {
+      const pageImages = await renderPdfPagesToImages(file, password);
+      setPendingPdf(null);
+      setPdfPassword("");
+      setPdfPasswordError(null);
+      await uploadPagesForOcr(pageImages);
+    } catch (err) {
+      if (err instanceof PdfPasswordRequiredError) {
+        // Pause here and ask for the password instead of failing outright.
+        setPendingPdf(file);
+        setStatementLoading(false);
+        return;
+      }
+      if (err instanceof PdfPasswordIncorrectError) {
+        setPdfPasswordError("That password didn't work. Try again.");
+        setStatementLoading(false);
+        return;
+      }
+      throw err;
+    }
+  }
+
+  async function handleSubmitPdfPassword() {
+    if (!pendingPdf || !pdfPassword) return;
+    setPdfPasswordError(null);
+    setStatementLoading(true);
+    try {
+      await processPdf(pendingPdf, pdfPassword);
+    } catch (err: any) {
+      setStatementLoading(false);
+      alert(err?.message || "Couldn't open that PDF. Try again.");
+    }
+  }
+
+  async function uploadPagesForOcr(images: Blob[]) {
+    setStatementLoading(true);
+
+    try {
       const formData = new FormData();
-      formData.append("file", toUpload, isPdf ? "statement.pdf" : "statement.jpg");
+      images.forEach((img, i) => formData.append("file", img, `page-${i + 1}.jpg`));
 
       const res = await fetch("/api/ocr/statement", {
         method: "POST",
@@ -112,8 +165,6 @@ export default function ImportPage() {
           selected: true,
         }))
       );
-    } catch (err: any) {
-      alert(err?.message || "Couldn't read that statement. Try again.");
     } finally {
       setStatementLoading(false);
     }
@@ -230,11 +281,12 @@ export default function ImportPage() {
           </div>
         ) : (
           <div className="space-y-md">
-            {!transactions && (
+            {!transactions && !pendingPdf && (
               <>
                 <p className="text-sm text-on-surface-variant">
                   Upload a screenshot or PDF of your bank/wallet statement — we'll
                   pull out every transaction so you can pick which ones to import.
+                  Password-protected PDFs are supported.
                 </p>
                 <button
                   onClick={() => fileInputRef.current?.click()}
@@ -256,6 +308,52 @@ export default function ImportPage() {
                   onChange={handleStatementFile}
                 />
               </>
+            )}
+
+            {pendingPdf && !transactions && (
+              <div className="space-y-md rounded-input border border-outline-variant bg-surface-low p-md">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-primary">lock</span>
+                  <p className="text-sm font-semibold text-primary">
+                    This PDF is password-protected
+                  </p>
+                </div>
+                <p className="text-xs text-on-surface-variant">
+                  Enter the password to open <strong>{pendingPdf.name}</strong> — it's
+                  only used locally in your browser to unlock the file, never stored.
+                </p>
+                <input
+                  type="password"
+                  value={pdfPassword}
+                  onChange={(e) => setPdfPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSubmitPdfPassword()}
+                  placeholder="PDF password"
+                  autoFocus
+                  className="w-full rounded-input border border-outline-variant bg-white px-md py-sm text-sm outline-none focus:border-primary"
+                />
+                {pdfPasswordError && (
+                  <p className="text-xs text-error">{pdfPasswordError}</p>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setPendingPdf(null);
+                      setPdfPassword("");
+                      setPdfPasswordError(null);
+                    }}
+                    className="flex-1 rounded-input border border-outline-variant py-2 text-sm font-semibold text-on-surface-variant"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSubmitPdfPassword}
+                    disabled={!pdfPassword || statementLoading}
+                    className="flex-1 rounded-input bg-primary py-2 text-sm font-semibold text-on-primary disabled:opacity-50"
+                  >
+                    {statementLoading ? "Unlocking..." : "Unlock"}
+                  </button>
+                </div>
+              </div>
             )}
 
             {transactions && (
@@ -319,7 +417,12 @@ export default function ImportPage() {
                 </div>
 
                 <button
-                  onClick={() => setTransactions(null)}
+                  onClick={() => {
+                    setTransactions(null);
+                    setPendingPdf(null);
+                    setPdfPassword("");
+                    setPdfPasswordError(null);
+                  }}
                   className="w-full text-center text-sm font-semibold text-on-surface-variant"
                 >
                   Upload a different file
