@@ -4,9 +4,13 @@ import { NextResponse, type NextRequest } from "next/server";
 const PUBLIC_PATHS = ["/login", "/signup"];
 
 export async function middleware(request: NextRequest) {
-  let response = NextResponse.next({
-    request: { headers: request.headers },
-  });
+  const requestHeaders = new Headers(request.headers);
+
+  // Buffer any cookie mutations Supabase wants to make (e.g. refreshed
+  // session tokens) instead of writing them to a response immediately —
+  // we don't create the final response until after we know the user and
+  // have set the x-user-data header, so this avoids losing cookie writes.
+  const cookiesToSet: { name: string; value: string; options: CookieOptions }[] = [];
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,10 +21,10 @@ export async function middleware(request: NextRequest) {
           return request.cookies.get(name)?.value;
         },
         set(name: string, value: string, options: CookieOptions) {
-          response.cookies.set({ name, value, ...options });
+          cookiesToSet.push({ name, value, options });
         },
         remove(name: string, options: CookieOptions) {
-          response.cookies.set({ name, value: "", ...options });
+          cookiesToSet.push({ name, value: "", options });
         },
       },
     }
@@ -36,15 +40,42 @@ export async function middleware(request: NextRequest) {
   if (!user && !isPublicPath) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
-    return NextResponse.redirect(url);
+    const redirectResponse = NextResponse.redirect(url);
+    cookiesToSet.forEach(({ name, value, options }) =>
+      redirectResponse.cookies.set({ name, value, ...options })
+    );
+    return redirectResponse;
   }
 
   // Logged in and trying to hit login/signup -> send to home
   if (user && isPublicPath) {
     const url = request.nextUrl.clone();
     url.pathname = "/";
-    return NextResponse.redirect(url);
+    const redirectResponse = NextResponse.redirect(url);
+    cookiesToSet.forEach(({ name, value, options }) =>
+      redirectResponse.cookies.set({ name, value, ...options })
+    );
+    return redirectResponse;
   }
+
+  // Pass the already-verified user downstream via a request header so pages
+  // don't need to call Supabase Auth a second time — this is the main fix
+  // for the multi-second navigation lag (see lib/supabase/get-user.ts).
+  if (user) {
+    requestHeaders.set(
+      "x-user-data",
+      JSON.stringify({
+        id: user.id,
+        email: user.email,
+        user_metadata: user.user_metadata,
+      })
+    );
+  }
+
+  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  cookiesToSet.forEach(({ name, value, options }) =>
+    response.cookies.set({ name, value, ...options })
+  );
 
   return response;
 }

@@ -1,13 +1,6 @@
 import Link from "next/link";
-
-const CATEGORY_ICONS: Record<string, string> = {
-  Groceries: "shopping_cart",
-  Dining: "restaurant",
-  Transport: "directions_car",
-  Tech: "devices",
-  Shopping: "shopping_bag",
-  Other: "receipt",
-};
+import { formatCurrency } from "@/lib/currency";
+import { CATEGORY_ICONS } from "@/lib/categories";
 
 export type Receipt = {
   id: string;
@@ -16,6 +9,8 @@ export type Receipt = {
   category: string;
   purchased_at: string;
   thumbnail_url?: string | null;
+  receipt_type?: "purchase" | "transfer" | "income" | null;
+  direction?: "expense" | "income" | null;
 };
 
 function formatTime(dateStr: string) {
@@ -23,7 +18,14 @@ function formatTime(dateStr: string) {
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-export default function ReceiptCard({ receipt }: { receipt: Receipt }) {
+export default function ReceiptCard({
+  receipt,
+  currency,
+}: {
+  receipt: Receipt;
+  currency?: string | null;
+}) {
+  const isIncome = receipt.direction === "income";
   const icon = CATEGORY_ICONS[receipt.category] || "receipt";
 
   return (
@@ -32,9 +34,17 @@ export default function ReceiptCard({ receipt }: { receipt: Receipt }) {
       className="flex items-center justify-between rounded-card border border-outline-variant bg-surface p-md shadow-sm transition-all active:scale-[0.98] active:bg-surface-low"
     >
       <div className="flex items-center gap-4">
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-surface-high text-xl">
-          <span className="material-symbols-outlined text-secondary">
-            {icon}
+        <div
+          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-xl ${
+            isIncome ? "bg-secondary/10" : "bg-surface-high"
+          }`}
+        >
+          <span
+            className={`material-symbols-outlined ${
+              isIncome ? "text-secondary" : "text-secondary"
+            }`}
+          >
+            {isIncome ? "arrow_downward" : icon}
           </span>
         </div>
         <div>
@@ -50,8 +60,11 @@ export default function ReceiptCard({ receipt }: { receipt: Receipt }) {
           </div>
         </div>
       </div>
-      <span className="font-semibold text-on-surface">
-        -${receipt.amount.toFixed(2)}
+      <span
+        className={`font-semibold ${isIncome ? "text-secondary" : "text-on-surface"}`}
+      >
+        {isIncome ? "+" : "-"}
+        {formatCurrency(receipt.amount, currency)}
       </span>
     </Link>
   );

@@ -1,15 +1,18 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { getCachedUser } from "@/lib/supabase/get-user";
 import BottomNav from "@/components/BottomNav";
 import LogoutButton from "@/components/LogoutButton";
+import { DEFAULT_CURRENCY, getCurrencySymbol } from "@/lib/currency";
 
 export default async function SettingsPage() {
-  const supabase = createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const user = await getCachedUser();
 
   const name = user?.user_metadata?.full_name || "Your Account";
   const email = user?.email || "";
   const initial = name[0]?.toUpperCase() || "?";
+
+  const currencyCode = user?.user_metadata?.currency || DEFAULT_CURRENCY;
+  const currencyDisplay = `${currencyCode} (${getCurrencySymbol(currencyCode)})`;
 
   return (
     <>
@@ -50,7 +53,12 @@ export default async function SettingsPage() {
             Preferences
           </h3>
           <div className="overflow-hidden rounded-card border border-outline-variant bg-surface">
-            <SettingsRow icon="payments" label="Default Currency" value="AUD ($)" />
+            <SettingsRow
+              icon="payments"
+              label="Default Currency"
+              value={currencyDisplay}
+              href="/settings/currency"
+            />
             <SettingsRow icon="download" label="Export Data" last />
           </div>
         </section>

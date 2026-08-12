@@ -10,8 +10,25 @@ create table if not exists receipts (
   purchased_at timestamptz not null default now(),
   items jsonb default '[]'::jsonb,
   thumbnail_url text,
+  -- Transfer-specific fields (bank transfer / wallet like JazzCash, Easypaisa, etc.)
+  -- Left null for ordinary purchase receipts.
+  receipt_type text not null default 'purchase',
+  payment_method text,
+  counterparty text,
+  reference_no text,
+  -- 'expense' (money out) or 'income' (money in) — used to net totals
+  -- across the app instead of treating every entry as a spend.
+  direction text not null default 'expense',
   created_at timestamptz not null default now()
 );
+
+-- Safe to re-run: if you already created this table before transfer support
+-- was added, this adds the new columns without touching existing data.
+alter table receipts add column if not exists receipt_type text not null default 'purchase';
+alter table receipts add column if not exists payment_method text;
+alter table receipts add column if not exists direction text not null default 'expense';
+alter table receipts add column if not exists counterparty text;
+alter table receipts add column if not exists reference_no text;
 
 create index if not exists receipts_user_id_idx on receipts(user_id);
 create index if not exists receipts_purchased_at_idx on receipts(purchased_at desc);
