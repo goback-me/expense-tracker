@@ -41,6 +41,13 @@ export default function ScanPage() {
   async function capturePhoto() {
     if (!videoRef.current) return;
 
+    // Guard against firing before the camera stream has actually started —
+    // videoWidth/Height are 0 until the first frame decodes.
+    if (!videoRef.current.videoWidth || !videoRef.current.videoHeight) {
+      alert("Camera is still starting up — give it a second and try again.");
+      return;
+    }
+
     const canvas = document.createElement("canvas");
     canvas.width = videoRef.current.videoWidth;
     canvas.height = videoRef.current.videoHeight;
@@ -58,7 +65,24 @@ export default function ScanPage() {
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
-    if (file) await processImage(file);
+
+    // Reset so choosing the exact same file again still fires onChange
+    e.target.value = "";
+
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      alert("That file isn't an image. Please choose a photo.");
+      return;
+    }
+
+    const MAX_SIZE_MB = 15;
+    if (file.size > MAX_SIZE_MB * 1024 * 1024) {
+      alert(`That image is too large (max ${MAX_SIZE_MB}MB). Try a smaller photo.`);
+      return;
+    }
+
+    await processImage(file);
   }
 
   async function processImage(blob: Blob) {
@@ -170,7 +194,6 @@ export default function ScanPage() {
           ref={fileInputRef}
           type="file"
           accept="image/*"
-          capture="environment"
           className="hidden"
           onChange={handleFileUpload}
         />
