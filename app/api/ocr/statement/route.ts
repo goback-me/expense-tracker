@@ -1,14 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@/lib/supabase/server";
+import { generateWithRetry } from "@/lib/gemini-retry";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-const MAX_TRANSACTIONS = 50;
+const MAX_TRANSACTIONS = 300;
 const MAX_SIZE_MB = 25;
 
-function buildPrompt() {
-  return `You are a bank/wallet statement parsing assistant. Look at this statement page — it may be a photo of a printed statement or a screenshot of a banking app's transaction history — and it lists MULTIPLE transactions.
+// How many statement pages get sent to Gemini in a single API call. This is
+// the main fix for hitting rate limits so easily: a 20-page statement used
+// to mean 20 separate API calls in quick succession, which blows straight
+// through the free tier's per-minute request cap. Gemini accepts multiple
+// images in one request, so batching pages together turns 20 calls into
+// ~3 — the same data, a fraction of the requests.
+const BATCH_SIZE = 8;
+
+// Small pause between batches as extra headroom under the per-minute limit,
+// on top of the reduction batching already gives us.
+const BATCH_DELAY_MS = 1500;
+
+function buildPrompt(pageCount: number) {
+  const pageNote =
+    pageCount > 1
+      ? `You will receive ${pageCount} images — these are multiple pages from the same bank/wallet statement, in order. Extract transactions from ALL of them combined into a single list.`
+      : `Look at this statement page — it may be a photo of a printed statement or a screenshot of a banking app's transaction history.`;
+
+  return `You are a bank/wallet statement parsing assistant. ${pageNote} It lists MULTIPLE transactions.
 
 For each transaction row, decide the direction:
 - "expense" for any debit, withdrawal, payment, or purchase.
@@ -26,11 +44,12 @@ Respond ONLY with valid JSON, no markdown fences, no preamble: a JSON array (not
 ]
 
 Rules:
-- Extract every transaction row you can see on this page.
+- Extract every transaction row you can see across all provided page(s).
 - "description" should be the merchant/counterparty/memo text from that row — keep it short and human-readable.
 - If the statement doesn't show the year, infer it from context (e.g. a header date) or use the current year.
-- Never invent a transaction that isn't actually shown. If you can't find any transactions on this page, return an empty array [].
-- Amounts should be positive numbers regardless of direction — the "direction" field carries the sign.`;
+- Never invent a transaction that isn't actually shown. If you can't find any transactions, return an empty array [].
+- Amounts should be positive numbers regardless of direction — the "direction" field carries the sign.
+- If the same page appears twice or transactions repeat across pages by mistake, still list them as they appear — do not attempt to deduplicate here.`;
 }
 
 class OcrApiError extends Error {
@@ -41,27 +60,33 @@ class OcrApiError extends Error {
   }
 }
 
-async function extractTransactionsFromImage(file: File) {
-  const isPdf = file.type === "application/pdf";
-  const isImage = file.type.startsWith("image/");
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  if (!isPdf && !isImage) {
-    throw new OcrApiError("Please upload an image or a PDF of your statement.", 415);
+async function extractTransactionsFromBatch(files: File[]) {
+  for (const file of files) {
+    const isPdf = file.type === "application/pdf";
+    const isImage = file.type.startsWith("image/");
+    if (!isPdf && !isImage) {
+      throw new OcrApiError("Please upload an image or a PDF of your statement.", 415);
+    }
   }
-
-  const buffer = Buffer.from(await file.arrayBuffer());
-  const base64 = buffer.toString("base64");
 
   const model = genAI.getGenerativeModel({
     model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
   });
 
+  const imageParts = await Promise.all(
+    files.map(async (file) => {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      return { inlineData: { mimeType: file.type, data: buffer.toString("base64") } };
+    })
+  );
+
   let result;
   try {
-    result = await model.generateContent([
-      buildPrompt(),
-      { inlineData: { mimeType: file.type, data: base64 } },
-    ]);
+    result = await generateWithRetry(model, [buildPrompt(files.length), ...imageParts]);
   } catch (apiErr: any) {
     console.error("Gemini API error:", apiErr);
     const status = apiErr?.status || apiErr?.response?.status;
@@ -116,6 +141,14 @@ async function extractTransactionsFromImage(file: File) {
     }));
 }
 
+function chunk<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const supabase = createClient();
@@ -145,16 +178,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const allTransactions: Awaited<ReturnType<typeof extractTransactionsFromImage>> = [];
+    const batches = chunk(files, BATCH_SIZE);
+    const allTransactions: Awaited<ReturnType<typeof extractTransactionsFromBatch>> = [];
     let lastError: OcrApiError | null = null;
 
-    // Process sequentially rather than in parallel — Gemini's free tier has
-    // a per-minute request cap, so a multi-page statement firing all pages
-    // at once would just trip rate limiting.
-    for (const file of files) {
+    for (let i = 0; i < batches.length; i++) {
       try {
-        const pageTransactions = await extractTransactionsFromImage(file);
-        allTransactions.push(...pageTransactions);
+        const batchTransactions = await extractTransactionsFromBatch(batches[i]);
+        allTransactions.push(...batchTransactions);
         if (allTransactions.length >= MAX_TRANSACTIONS) break;
       } catch (err) {
         if (err instanceof OcrApiError) {
@@ -162,6 +193,12 @@ export async function POST(request: NextRequest) {
         } else {
           throw err;
         }
+      }
+
+      // Pause between batches (not after the last one) to stay comfortably
+      // under the per-minute rate limit.
+      if (i < batches.length - 1) {
+        await sleep(BATCH_DELAY_MS);
       }
     }
 

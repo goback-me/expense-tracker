@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { generateWithRetry } from "@/lib/gemini-retry";
 import { createClient } from "@/lib/supabase/server";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
@@ -74,7 +75,7 @@ export async function POST(request: NextRequest) {
 
     let result;
     try {
-      result = await model.generateContent([buildPrompt(todayISO), text]);
+      result = await generateWithRetry(model, [buildPrompt(todayISO), text]);
     } catch (apiErr: any) {
       console.error("Gemini API error:", apiErr);
       const status = apiErr?.status || apiErr?.response?.status;

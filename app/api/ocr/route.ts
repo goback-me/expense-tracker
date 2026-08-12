@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@/lib/supabase/server";
+import { generateWithRetry } from "@/lib/gemini-retry";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
@@ -62,7 +63,7 @@ export async function POST(request: NextRequest) {
 
     let result;
     try {
-      result = await model.generateContent([
+      result = await generateWithRetry(model, [
         EXTRACTION_PROMPT,
         {
           inlineData: {
