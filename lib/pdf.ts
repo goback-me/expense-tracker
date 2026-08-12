@@ -14,35 +14,60 @@ export class PdfPasswordIncorrectError extends Error {
 
 const MAX_PAGES = 10; // cap to keep OCR calls (and cost) bounded
 
+// Pinned to the version installed in package.json — bump both together if
+// you ever upgrade pdfjs-dist.
+const PDFJS_VERSION = "6.2.108";
+const PDFJS_CDN_BASE = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build`;
+
+let pdfjsLibPromise: Promise<any> | null = null;
+
+/**
+ * Loads pdfjs-dist as a genuine browser-native ES module fetched from a CDN
+ * at runtime, instead of importing it as an npm package through webpack.
+ *
+ * Why: pdfjs-dist v6+ ships pure ESM builds that use `import.meta.url` and
+ * raw import/export syntax. Next.js's build pipeline (webpack, and whatever
+ * transform runs over "use client" component dependencies during the
+ * server prerender pass) can fail to parse that correctly — producing
+ * errors like "'import.meta' cannot be used outside of module code" during
+ * `next build` on Vercel, even though the code only ever runs in the
+ * browser. pdfjs-dist's own source works around parts of this with
+ * `/*webpackIgnore*\/` comments, but that doesn't cover every bundler code
+ * path.
+ *
+ * The fix: build the module URL dynamically (not a static string literal)
+ * so webpack can't statically analyze or attempt to bundle this import at
+ * all — it's left as a plain runtime `import()` call, which the browser
+ * itself resolves natively via real ES module loading. Next.js/webpack
+ * never touches pdfjs-dist's source, so it can't break the build.
+ */
+function loadPdfjs(): Promise<any> {
+  if (typeof window === "undefined") {
+    return Promise.reject(new Error("PDF rendering is only available in the browser."));
+  }
+
+  if (!pdfjsLibPromise) {
+    const url = `${PDFJS_CDN_BASE}/pdf.min.mjs`;
+    pdfjsLibPromise = import(/* webpackIgnore: true */ url);
+  }
+
+  return pdfjsLibPromise;
+}
+
 /**
  * Renders every page of a PDF to a JPEG blob. If the PDF is encrypted,
  * pass `password` — pdf.js will use it to decrypt on load. Throws
  * PdfPasswordRequiredError if no password was given but one is needed, or
  * PdfPasswordIncorrectError if the one given was wrong. Callers should catch
  * both to prompt the person for a password and retry.
- *
- * pdfjs-dist is imported dynamically (not at module top level) because it
- * touches browser-only globals (e.g. DOMMatrix) as soon as its module code
- * runs. A static top-level import would get evaluated during Next.js's
- * server-side render pass of this client component and crash with
- * "DOMMatrix is not defined". A dynamic import() deferred until this
- * function actually runs (from a browser click handler, after hydration)
- * guarantees it only ever loads in the browser.
  */
 export async function renderPdfPagesToImages(
   file: File,
   password?: string
 ): Promise<Blob[]> {
-  if (typeof window === "undefined") {
-    throw new Error("PDF rendering is only available in the browser.");
-  }
+  const pdfjsLib = await loadPdfjs();
 
-  const pdfjsLib = await import("pdfjs-dist");
-
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    "pdfjs-dist/build/pdf.worker.min.mjs",
-    import.meta.url
-  ).toString();
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN_BASE}/pdf.worker.min.mjs`;
 
   const arrayBuffer = await file.arrayBuffer();
 
