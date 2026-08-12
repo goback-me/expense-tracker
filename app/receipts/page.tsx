@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { getCachedUser } from "@/lib/supabase/get-user";
 import BottomNav from "@/components/BottomNav";
@@ -58,6 +59,14 @@ export default async function ReceiptsPage({
           Receipts
         </h1>
         <div className="flex items-center gap-3 text-on-surface-variant">
+          <Link
+            href="/receipts/import"
+            aria-label="Import from SMS or statement"
+            className="flex items-center gap-1 rounded-full border border-outline-variant bg-surface-low px-3 py-1.5 text-xs font-semibold text-primary transition-transform active:scale-95"
+          >
+            <span className="material-symbols-outlined text-[18px]">sms</span>
+            Import
+          </Link>
           <span className="material-symbols-outlined">search</span>
           <span className="material-symbols-outlined">tune</span>
         </div>
@@ -109,4 +118,4 @@ export default async function ReceiptsPage({
       <BottomNav />
     </>
   );
-}
+} 
