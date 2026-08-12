@@ -1,0 +1,187 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+
+export default function ScanPage() {
+  const router = useRouter();
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const [flashOn, setFlashOn] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [processing, setProcessing] = useState(false);
+
+  useEffect(() => {
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false,
+        });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      } catch (err) {
+        setCameraError(
+          "Camera unavailable. Use the gallery button to upload a photo instead."
+        );
+      }
+    }
+
+    startCamera();
+
+    return () => {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  async function capturePhoto() {
+    if (!videoRef.current) return;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = videoRef.current.videoWidth;
+    canvas.height = videoRef.current.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx?.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob(
+      async (blob) => {
+        if (blob) await processImage(blob);
+      },
+      "image/jpeg",
+      0.9
+    );
+  }
+
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) await processImage(file);
+  }
+
+  async function processImage(blob: Blob) {
+    setProcessing(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("image", blob, "receipt.jpg");
+
+      const res = await fetch("/api/ocr", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) throw new Error("OCR failed");
+
+      const data = await res.json();
+
+      // Store extracted data + image in sessionStorage to pass to confirm screen
+      const imageUrl = URL.createObjectURL(blob);
+      sessionStorage.setItem("receiptDraft", JSON.stringify(data));
+      sessionStorage.setItem("receiptImagePreview", imageUrl);
+
+      router.push("/receipts/new");
+    } catch (err) {
+      alert("Couldn't read that receipt. Try again with better lighting.");
+      setProcessing(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black text-white">
+      {/* Camera feed */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="absolute inset-0 h-full w-full object-cover"
+      />
+
+      {cameraError && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/80 px-8 text-center text-sm text-white/80">
+          {cameraError}
+        </div>
+      )}
+
+      {/* Scan overlay guide */}
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute inset-x-[10%] top-[20%] bottom-[25%] rounded-lg border-2 border-white/70" />
+      </div>
+
+      {/* Top bar */}
+      <div className="safe-top absolute left-0 right-0 top-0 flex flex-col gap-6 px-container-margin pt-6">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => router.back()}
+            className="flex h-10 w-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-md"
+            aria-label="Close"
+          >
+            <span className="material-symbols-outlined">close</span>
+          </button>
+          <div className="flex items-center gap-2 rounded-full bg-black/40 px-4 py-1.5 backdrop-blur-md">
+            <span className="material-symbols-outlined text-sm">imagesmode</span>
+            <span className="text-sm font-medium">Scan</span>
+          </div>
+        </div>
+        <div className="text-center">
+          <p className="text-lg font-semibold drop-shadow-md">
+            Align receipt within frame
+          </p>
+          <p className="mt-1 text-sm text-white/70 drop-shadow-md">
+            Ensure edges are visible
+          </p>
+        </div>
+      </div>
+
+      {/* Bottom controls */}
+      <div className="safe-bottom absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/80 to-transparent px-container-margin pb-10 pt-8">
+        <button
+          onClick={() => setFlashOn((v) => !v)}
+          className={`flex h-12 w-12 items-center justify-center rounded-full backdrop-blur-md transition-colors ${
+            flashOn ? "bg-white text-black" : "bg-black/40 text-white"
+          }`}
+          aria-label="Toggle flash"
+        >
+          <span className="material-symbols-outlined">
+            {flashOn ? "flash_on" : "flash_off"}
+          </span>
+        </button>
+
+        <button
+          onClick={capturePhoto}
+          disabled={processing || !!cameraError}
+          aria-label="Take photo"
+          className="flex h-[72px] w-[72px] items-center justify-center rounded-full border-4 border-white p-1 disabled:opacity-40"
+        >
+          <div className="h-full w-full rounded-full bg-white transition-transform active:scale-90" />
+        </button>
+
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="flex h-12 w-12 items-center justify-center rounded-lg border border-white/20 bg-white/10 backdrop-blur-md"
+          aria-label="Choose from gallery"
+        >
+          <span className="material-symbols-outlined">photo_library</span>
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={handleFileUpload}
+        />
+      </div>
+
+      {processing && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+          <p className="text-sm text-white/80">Reading receipt...</p>
+        </div>
+      )}
+    </div>
+  );
+}
