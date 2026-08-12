@@ -1,24 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@/lib/supabase/server";
-import { generateWithRetry } from "@/lib/gemini-retry";
+import { createMessageWithRetry } from "@/lib/claude-retry";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
 const MAX_TRANSACTIONS = 300;
 const MAX_SIZE_MB = 25;
 
-// How many statement pages get sent to Gemini in a single API call. This is
-// the main fix for hitting rate limits so easily: a 20-page statement used
-// to mean 20 separate API calls in quick succession, which blows straight
-// through the free tier's per-minute request cap. Gemini accepts multiple
-// images in one request, so batching pages together turns 20 calls into
-// ~3 — the same data, a fraction of the requests.
+// How many statement pages get sent to Claude in a single API call. Sending
+// several images per request instead of one call per page keeps the total
+// number of API calls (and therefore cost + rate-limit exposure) low for
+// long, multi-page statements.
 const BATCH_SIZE = 8;
 
-// Small pause between batches as extra headroom under the per-minute limit,
-// on top of the reduction batching already gives us.
-const BATCH_DELAY_MS = 1500;
+// Small pause between batches as extra headroom under per-minute limits.
+const BATCH_DELAY_MS = 1000;
 
 function buildPrompt(pageCount: number) {
   const pageNote =
@@ -64,35 +61,47 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const ALLOWED_MEDIA_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
 async function extractTransactionsFromBatch(files: File[]) {
   for (const file of files) {
-    const isPdf = file.type === "application/pdf";
-    const isImage = file.type.startsWith("image/");
-    if (!isPdf && !isImage) {
-      throw new OcrApiError("Please upload an image or a PDF of your statement.", 415);
+    if (!ALLOWED_MEDIA_TYPES.includes(file.type)) {
+      throw new OcrApiError("Please upload an image of your statement.", 415);
     }
   }
 
-  const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
-  });
-
-  const imageParts = await Promise.all(
+  const imageBlocks = await Promise.all(
     files.map(async (file) => {
       const buffer = Buffer.from(await file.arrayBuffer());
-      return { inlineData: { mimeType: file.type, data: buffer.toString("base64") } };
+      return {
+        type: "image" as const,
+        source: {
+          type: "base64" as const,
+          media_type: file.type as "image/jpeg" | "image/png" | "image/webp" | "image/gif",
+          data: buffer.toString("base64"),
+        },
+      };
     })
   );
 
   let result;
   try {
-    result = await generateWithRetry(model, [buildPrompt(files.length), ...imageParts]);
+    result = await createMessageWithRetry(anthropic, {
+      model: process.env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
+      max_tokens: 4096,
+      messages: [
+        {
+          role: "user",
+          content: [...imageBlocks, { type: "text", text: buildPrompt(files.length) }],
+        },
+      ],
+    });
   } catch (apiErr: any) {
-    console.error("Gemini API error:", apiErr);
-    const status = apiErr?.status || apiErr?.response?.status;
+    console.error("Claude API error:", apiErr);
+    const status = apiErr?.status;
     if (status === 429) {
       throw new OcrApiError(
-        "You've hit the free limit for right now. Wait a minute and try again.",
+        "You've hit the request limit for right now. Wait a minute and try again.",
         429
       );
     }
@@ -108,7 +117,8 @@ async function extractTransactionsFromBatch(files: File[]) {
     );
   }
 
-  const raw = result.response.text().trim();
+  const textBlock = result.content.find((block: any) => block.type === "text");
+  const raw = (textBlock?.text || "").trim();
   const cleaned = raw.replace(/```json|```/g, "").trim();
 
   let parsed;
@@ -161,8 +171,9 @@ export async function POST(request: NextRequest) {
     }
 
     const formData = await request.formData();
-    // Supports one file (a single image/PDF) or multiple (pages rasterized
-    // client-side from a password-protected PDF — see lib/pdf.ts).
+    // Every file arriving here is already a rasterized JPEG page image —
+    // any PDF gets rendered to images client-side first (see lib/pdf.ts) —
+    // so this always deals in plain images, never raw PDF bytes.
     const files = formData.getAll("file").filter((f): f is File => f instanceof File);
 
     if (files.length === 0) {
@@ -195,8 +206,8 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Pause between batches (not after the last one) to stay comfortably
-      // under the per-minute rate limit.
+      // Pause between batches (not after the last one) as extra rate-limit
+      // headroom.
       if (i < batches.length - 1) {
         await sleep(BATCH_DELAY_MS);
       }

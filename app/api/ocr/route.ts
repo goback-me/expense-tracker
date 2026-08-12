@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@/lib/supabase/server";
-import { generateWithRetry } from "@/lib/gemini-retry";
+import { createMessageWithRetry } from "@/lib/claude-retry";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
 const EXTRACTION_PROMPT = `You are a receipt-scanning assistant. Look at this receipt image and extract the data.
 
@@ -56,29 +56,37 @@ export async function POST(request: NextRequest) {
 
     const buffer = Buffer.from(await image.arrayBuffer());
     const base64 = buffer.toString("base64");
-
-    const model = genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
-    });
+    const mediaType = (image.type || "image/jpeg") as
+      | "image/jpeg"
+      | "image/png"
+      | "image/webp"
+      | "image/gif";
 
     let result;
     try {
-      result = await generateWithRetry(model, [
-        EXTRACTION_PROMPT,
-        {
-          inlineData: {
-            mimeType: image.type || "image/jpeg",
-            data: base64,
+      result = await createMessageWithRetry(anthropic, {
+        model: process.env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
+        max_tokens: 1024,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: { type: "base64", media_type: mediaType, data: base64 },
+              },
+              { type: "text", text: EXTRACTION_PROMPT },
+            ],
           },
-        },
-      ]);
+        ],
+      });
     } catch (apiErr: any) {
-      console.error("Gemini API error:", apiErr);
+      console.error("Claude API error:", apiErr);
 
-      const status = apiErr?.status || apiErr?.response?.status;
+      const status = apiErr?.status;
       if (status === 429) {
         return NextResponse.json(
-          { error: "You've hit the free scan limit for right now. Wait a minute and try again, or add this one manually." },
+          { error: "You've hit the scan limit for right now. Wait a minute and try again, or add this one manually." },
           { status: 429 }
         );
       }
@@ -94,7 +102,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const text = result.response.text().trim();
+    const textBlock = result.content.find((block: any) => block.type === "text");
+    const text = (textBlock?.text || "").trim();
     const cleaned = text.replace(/```json|```/g, "").trim();
 
     let parsed;

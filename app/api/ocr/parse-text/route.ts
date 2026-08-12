@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { generateWithRetry } from "@/lib/gemini-retry";
+import Anthropic from "@anthropic-ai/sdk";
+import { createMessageWithRetry } from "@/lib/claude-retry";
 import { createClient } from "@/lib/supabase/server";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
 function buildPrompt(todayISO: string) {
   return `You are a bank/wallet SMS parsing assistant. The person will paste the raw text of a single SMS or push notification about one transaction — e.g. from a bank, JazzCash, Easypaisa, PayPal, or similar.
@@ -37,7 +37,11 @@ Field rules:
 - If receipt_type is "transfer": set "category" to "Transfer". "store_name" is a short label like "JazzCash to Ali Raza" or "HBL Bank from Ahmed". "payment_method" is the bank/wallet name. "counterparty" is the other party's name if mentioned. "reference_no" is any transaction/reference ID mentioned.
 - "items" is always an empty array — this is a text message, not an itemized receipt.
 - If the amount or a required field genuinely isn't present in the text, make the most reasonable guess rather than leaving it empty, except payment_method/counterparty/reference_no which can be null if not mentioned.
-- If the pasted text doesn't look like a transaction message at all, still do your best to extract whatever amount and context is present.`;
+- If the pasted text doesn't look like a transaction message at all, still do your best to extract whatever amount and context is present.
+
+Here is the message to parse:
+"""
+`;
 }
 
 export async function POST(request: NextRequest) {
@@ -67,21 +71,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const model = genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
-    });
-
     const todayISO = new Date().toISOString().slice(0, 10);
 
     let result;
     try {
-      result = await generateWithRetry(model, [buildPrompt(todayISO), text]);
+      result = await createMessageWithRetry(anthropic, {
+        model: process.env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
+        max_tokens: 512,
+        messages: [
+          {
+            role: "user",
+            content: `${buildPrompt(todayISO)}${text}\n"""`,
+          },
+        ],
+      });
     } catch (apiErr: any) {
-      console.error("Gemini API error:", apiErr);
-      const status = apiErr?.status || apiErr?.response?.status;
+      console.error("Claude API error:", apiErr);
+      const status = apiErr?.status;
       if (status === 429) {
         return NextResponse.json(
-          { error: "You've hit the free limit for right now. Wait a minute and try again, or add this manually." },
+          { error: "You've hit the limit for right now. Wait a minute and try again, or add this manually." },
           { status: 429 }
         );
       }
@@ -91,7 +100,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const raw = result.response.text().trim();
+    const textBlock = result.content.find((block: any) => block.type === "text");
+    const raw = (textBlock?.text || "").trim();
     const cleaned = raw.replace(/```json|```/g, "").trim();
 
     let parsed;
