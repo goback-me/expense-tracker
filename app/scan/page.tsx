@@ -273,4 +273,4 @@ export default function ScanPage() {
       )}
     </div>
   );
-}
+} 
