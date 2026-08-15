@@ -72,12 +72,13 @@ export default function NewReceiptPage() {
   function switchDirection(d: Direction) {
     setDirection(d);
     setCategory(d === "income" ? "Other Income" : "Other");
-    if (d === "income") setReceiptType("purchase"); // n/a for income, just reset
   }
 
   function switchType(type: ReceiptType) {
     setReceiptType(type);
-    setCategory(type === "transfer" ? "Transfer" : "Other");
+    setCategory(
+      type === "transfer" ? "Transfer" : direction === "income" ? "Other Income" : "Other"
+    );
   }
 
   async function handleSave() {
@@ -99,17 +100,19 @@ export default function NewReceiptPage() {
         .from("receipts")
         .upload(path, blob, { contentType: "image/jpeg" });
 
+      // Store the bare path, not a permanent public URL — the bucket is
+      // private, so a signed (time-limited) URL gets generated whenever
+      // the image is actually displayed instead.
       if (!uploadError) {
-        const { data } = supabase.storage.from("receipts").getPublicUrl(path);
-        thumbnailUrl = data.publicUrl;
+        thumbnailUrl = path;
       }
     }
 
-    const isExpenseTransfer = direction === "expense" && receiptType === "transfer";
+    const isTransfer = receiptType === "transfer";
 
     // For transfers, build a readable display name from method + counterparty
     // e.g. "JazzCash — Ali Raza". For income, storeName doubles as "Source".
-    const displayName = isExpenseTransfer
+    const displayName = isTransfer
       ? [paymentMethod.trim(), counterparty.trim()].filter(Boolean).join(" — ") ||
         "Transfer"
       : storeName || (direction === "income" ? "Income" : "Expense");
@@ -120,13 +123,13 @@ export default function NewReceiptPage() {
       purchased_at: date,
       amount: parseFloat(amount) || 0,
       category,
-      items: isExpenseTransfer || direction === "income" ? [] : items,
+      items: isTransfer || direction === "income" ? [] : items,
       thumbnail_url: thumbnailUrl,
       direction,
-      receipt_type: direction === "income" ? "income" : receiptType,
-      payment_method: isExpenseTransfer ? paymentMethod || null : null,
-      counterparty: isExpenseTransfer ? counterparty || null : null,
-      reference_no: isExpenseTransfer ? referenceNo || null : null,
+      receipt_type: receiptType,
+      payment_method: isTransfer ? paymentMethod || null : null,
+      counterparty: isTransfer ? counterparty || null : null,
+      reference_no: isTransfer ? referenceNo || null : null,
     });
 
     setSaving(false);
@@ -142,9 +145,9 @@ export default function NewReceiptPage() {
     router.push("/receipts");
   }
 
-  const isExpenseTransfer = direction === "expense" && receiptType === "transfer";
+  const isTransfer = receiptType === "transfer";
 
-  const canSave = isExpenseTransfer
+  const canSave = isTransfer
     ? !!paymentMethod && !!amount
     : !!storeName && !!amount;
 
@@ -153,7 +156,7 @@ export default function NewReceiptPage() {
   return (
     <>
       <TopBar
-        title={isExpenseTransfer ? "Confirm Transfer" : "Confirm Details"}
+        title={isTransfer ? "Confirm Transfer" : "Confirm Details"}
         rightIcon={saving ? undefined : "save"}
         onRightClick={handleSave}
       />
@@ -195,9 +198,8 @@ export default function NewReceiptPage() {
           </button>
         </div>
 
-        {/* Purchase / Transfer sub-toggle — only relevant for expenses */}
-        {direction === "expense" && (
-          <div className="mb-lg flex w-full rounded-input bg-surface-low p-1">
+        {/* Purchase / Transfer sub-toggle */}
+        <div className="mb-lg flex w-full rounded-input bg-surface-low p-1">
             <button
               onClick={() => switchType("purchase")}
               className={`flex-1 rounded py-2 text-sm font-semibold transition-colors ${
@@ -219,10 +221,9 @@ export default function NewReceiptPage() {
               Bank / Wallet Transfer
             </button>
           </div>
-        )}
 
         <div className="mb-lg space-y-sm">
-          {isExpenseTransfer ? (
+          {isTransfer ? (
             <>
               <div className="rounded-input border border-outline-variant bg-surface-low px-md py-sm">
                 <label className="mb-xs block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
@@ -306,7 +307,7 @@ export default function NewReceiptPage() {
             </div>
           </div>
 
-          {!isExpenseTransfer && (
+          {!isTransfer && (
             <div className="mt-md flex flex-wrap items-center gap-2">
               <span className="mr-sm text-xs font-semibold uppercase tracking-wide text-on-surface-variant">
                 Category

@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, getCurrencySymbol } from "@/lib/currency";
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "@/lib/categories";
+import { extractStoragePath } from "@/lib/supabase/storage-path";
 
 type Item = { name: string; price: number };
 
@@ -39,11 +40,28 @@ export default function ReceiptDetailClient({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
 
   const isTransfer = receipt.receipt_type === "transfer";
   const isIncome = receipt.direction === "income";
   const items: Item[] = receipt.items || [];
   const currencySymbol = getCurrencySymbol(currency);
+
+  // The bucket is private — generate a short-lived signed URL to actually
+  // display the image instead of relying on a permanent public link.
+  useEffect(() => {
+    if (!receipt.thumbnail_url) {
+      setImageUrl(null);
+      return;
+    }
+
+    const path = extractStoragePath(receipt.thumbnail_url);
+
+    supabase.storage
+      .from("receipts")
+      .createSignedUrl(path, 3600) // 1 hour — plenty for a single page view
+      .then(({ data }) => setImageUrl(data?.signedUrl ?? null));
+  }, [receipt.thumbnail_url, supabase]);
 
   // Edit form state
   const [storeName, setStoreName] = useState(receipt.store_name);
@@ -110,12 +128,8 @@ export default function ReceiptDetailClient({
     // orphaned file in Storage costs nothing meaningful.
     if (receipt.thumbnail_url) {
       try {
-        const marker = "/receipts/";
-        const idx = receipt.thumbnail_url.indexOf(marker);
-        if (idx !== -1) {
-          const path = receipt.thumbnail_url.slice(idx + marker.length);
-          await supabase.storage.from("receipts").remove([path]);
-        }
+        const path = extractStoragePath(receipt.thumbnail_url);
+        await supabase.storage.from("receipts").remove([path]);
       } catch {
         // Non-critical — ignore.
       }
@@ -175,14 +189,15 @@ export default function ReceiptDetailClient({
       </header>
 
       <main className="flex-1 overflow-y-auto px-container-margin pt-md pb-32 no-scrollbar">
-        {receipt.thumbnail_url && (
+        {imageUrl && (
           <div className="mb-lg h-40 w-full overflow-hidden rounded-input border border-outline-variant">
             <Image
-              src={receipt.thumbnail_url}
+              src={imageUrl}
               alt={receipt.store_name}
               width={400}
               height={160}
               className="h-full w-full object-cover"
+              unoptimized
             />
           </div>
         )}

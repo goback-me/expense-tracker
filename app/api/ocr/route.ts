@@ -12,8 +12,9 @@ First, decide what kind of receipt this is:
 - "transfer" — a bank transfer, wallet transfer (e.g. JazzCash, Easypaisa, bKash, PayPal, Venmo, Zelle, Cash App, Wise, any bank app screenshot), or ATM/deposit slip. These have a payment method/provider, a sender and/or recipient, and often a transaction/reference number — but no store and no itemized list.
 
 Then decide the direction of money:
-- "expense" — money going out (any purchase, or a transfer the account holder sent).
-- "income" — money coming in (salary credited, a transfer the account holder received, a refund, a deposit). Look for words like "received", "credited", "deposit" as signals of income, versus "sent", "paid", "debited" for expense.
+- "income" — money coming IN to the account holder. Signal words: "received", "credited", "deposit", "refund", "cashback", "reversed", "salary", "payment received". A screenshot showing money arriving is income even if it's formatted like a receipt/confirmation screen.
+- "expense" — money going OUT from the account holder. Signal words: "sent", "paid", "debited", "purchase", "withdrawn", "deducted". This is the default ONLY when there is no clear income signal.
+- This field is REQUIRED — always include your best judgment, never omit it.
 
 Respond ONLY with valid JSON, no markdown fences, no preamble, in exactly this shape:
 {
@@ -66,7 +67,7 @@ export async function POST(request: NextRequest) {
     try {
       result = await createMessageWithRetry(anthropic, {
         model: process.env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
-        max_tokens: 1024,
+        max_tokens: 2048,
         messages: [
           {
             role: "user",

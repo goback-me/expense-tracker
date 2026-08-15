@@ -43,6 +43,7 @@ export default function ScanPage() {
   }, []);
 
   async function capturePhoto() {
+    if (processing) return; // guard against a rapid double-tap firing twice
     if (!videoRef.current) return;
 
     // Guard against firing before the camera stream has actually started —
@@ -52,6 +53,12 @@ export default function ScanPage() {
       return;
     }
 
+    // Set this synchronously, before the async canvas.toBlob callback, so
+    // the capture button disables on the very next render — otherwise
+    // there's a brief window where a second tap could slip through before
+    // React re-renders with the disabled state.
+    setProcessing(true);
+
     const canvas = document.createElement("canvas");
     canvas.width = videoRef.current.videoWidth;
     canvas.height = videoRef.current.videoHeight;
@@ -60,8 +67,11 @@ export default function ScanPage() {
 
     canvas.toBlob(
       async (blob) => {
-        if (!blob) return;
-        setProcessing(true);
+        if (!blob) {
+          setProcessing(false);
+          alert("Couldn't capture that photo. Try again.");
+          return;
+        }
         try {
           const resized = await normalizeToJpeg(blob);
           await processImage(resized);
@@ -82,6 +92,7 @@ export default function ScanPage() {
     e.target.value = "";
 
     if (!file) return;
+    if (processing) return; // guard against overlapping invocations
 
     if (!file.type.startsWith("image/")) {
       alert("That file isn't an image. Please choose a photo.");
