@@ -21,7 +21,11 @@ type StatementTxn = {
   direction: "expense" | "income";
   reference_no: string | null;
   selected: boolean;
+  isDuplicate: boolean;
 };
+
+const REQUEST_TIMEOUT_MS = 45000; // single-message calls (SMS parse)
+const STATEMENT_TIMEOUT_MS = 120000; // multi-page statements batch several API calls sequentially, so this needs more headroom
 
 export default function ImportPage() {
   const router = useRouter();
@@ -39,6 +43,7 @@ export default function ImportPage() {
   const [transactions, setTransactions] = useState<StatementTxn[] | null>(null);
   const [importing, setImporting] = useState(false);
   const [currencySymbol, setCurrencySymbol] = useState(getCurrencySymbol(DEFAULT_CURRENCY));
+  const [pageWarning, setPageWarning] = useState<string | null>(null);
 
   // Password-protected PDF state
   const [pendingPdf, setPendingPdf] = useState<File | null>(null);
@@ -55,11 +60,15 @@ export default function ImportPage() {
     if (!smsText.trim()) return;
     setSmsLoading(true);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
     try {
       const res = await fetch("/api/ocr/parse-text", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: smsText }),
+        signal: controller.signal,
       });
 
       const data = await res.json().catch(() => null);
@@ -73,8 +82,14 @@ export default function ImportPage() {
 
       router.push("/receipts/new");
     } catch (err: any) {
-      alert(err?.message || "Couldn't parse that message. Try again.");
+      const message =
+        err?.name === "AbortError"
+          ? "That took too long to respond. Check your connection and try again."
+          : err?.message || "Couldn't parse that message. Try again.";
+      alert(message);
       setSmsLoading(false);
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -92,11 +107,15 @@ export default function ImportPage() {
 
     setStatementLoading(true);
     setTransactions(null);
+    setPageWarning(null);
 
     try {
       if (isPdf) {
         await processPdf(file);
       } else {
+        // A single image is inherently limited to what's visible on that one
+        // screen — if you need a wider date range, export a PDF instead so
+        // every page/transaction gets processed.
         const normalized = await normalizeToJpeg(file);
         await uploadPagesForOcr([normalized]);
       }
@@ -108,11 +127,21 @@ export default function ImportPage() {
 
   async function processPdf(file: File, password?: string) {
     try {
-      const pageImages = await renderPdfPagesToImages(file, password);
+      const { images, truncated, renderedPages, totalPages } = await renderPdfPagesToImages(
+        file,
+        password
+      );
       setPendingPdf(null);
       setPdfPassword("");
       setPdfPasswordError(null);
-      await uploadPagesForOcr(pageImages);
+
+      if (truncated) {
+        setPageWarning(
+          `This PDF has ${totalPages} pages — only processed the first ${renderedPages}. If some transactions are missing, try splitting the statement into smaller date ranges and importing each separately.`
+        );
+      }
+
+      await uploadPagesForOcr(images);
     } catch (err) {
       if (err instanceof PdfPasswordRequiredError) {
         // Pause here and ask for the password instead of failing outright.
@@ -144,6 +173,9 @@ export default function ImportPage() {
   async function uploadPagesForOcr(images: Blob[]) {
     setStatementLoading(true);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), STATEMENT_TIMEOUT_MS);
+
     try {
       const formData = new FormData();
       images.forEach((img, i) => formData.append("file", img, `page-${i + 1}.jpg`));
@@ -151,6 +183,7 @@ export default function ImportPage() {
       const res = await fetch("/api/ocr/statement", {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       });
 
       const data = await res.json().catch(() => null);
@@ -159,15 +192,59 @@ export default function ImportPage() {
         throw new Error(data?.error || `Something went wrong (error ${res.status}).`);
       }
 
+      const rawTxns = data.transactions as Omit<StatementTxn, "selected" | "isDuplicate">[];
+      const withDuplicateFlags = await flagDuplicates(rawTxns);
+
       setTransactions(
-        (data.transactions as Omit<StatementTxn, "selected">[]).map((t) => ({
+        withDuplicateFlags.map((t) => ({
           ...t,
-          selected: true,
+          // Uncheck likely duplicates by default so you don't double-import
+          // by accident — you can still tap to select one if it's a
+          // legitimate repeat charge on the same day for the same amount.
+          selected: !t.isDuplicate,
         }))
       );
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        throw new Error("That took too long to process. Try a shorter statement or fewer pages.");
+      }
+      throw err;
     } finally {
+      clearTimeout(timeoutId);
       setStatementLoading(false);
     }
+  }
+
+  /**
+   * Checks each extracted transaction against what's already saved for this
+   * user (same date + same amount, within a cent). This is what stops the
+   * same statement — or an overlapping date range from a second statement —
+   * from silently creating duplicate entries every time you import.
+   */
+  async function flagDuplicates(
+    txns: Omit<StatementTxn, "selected" | "isDuplicate">[]
+  ): Promise<Omit<StatementTxn, "selected">[]> {
+    if (txns.length === 0) return [];
+
+    const dates = txns.map((t) => t.date).sort();
+    const minDate = dates[0];
+    const maxDate = dates[dates.length - 1];
+
+    const { data: existing } = await supabase
+      .from("receipts")
+      .select("purchased_at, amount")
+      .gte("purchased_at", minDate)
+      .lte("purchased_at", `${maxDate}T23:59:59`);
+
+    const existingRows = existing || [];
+
+    return txns.map((t) => {
+      const isDuplicate = existingRows.some((row) => {
+        const rowDate = new Date(row.purchased_at).toISOString().slice(0, 10);
+        return rowDate === t.date && Math.abs(Number(row.amount) - t.amount) < 0.01;
+      });
+      return { ...t, isDuplicate };
+    });
   }
 
   function toggleTxn(index: number) {
@@ -234,6 +311,7 @@ export default function ImportPage() {
   }
 
   const selectedCount = transactions?.filter((t) => t.selected).length ?? 0;
+  const duplicateCount = transactions?.filter((t) => t.isDuplicate).length ?? 0;
 
   return (
     <>
@@ -284,9 +362,9 @@ export default function ImportPage() {
             {!transactions && !pendingPdf && (
               <>
                 <p className="text-sm text-on-surface-variant">
-                  Upload a screenshot or PDF of your bank/wallet statement — we'll
-                  pull out every transaction so you can pick which ones to import.
-                  Password-protected PDFs are supported.
+                  Upload a PDF export of your bank/wallet statement for the
+                  widest date range — a screenshot only captures what's
+                  visible on one screen. Password-protected PDFs are supported.
                 </p>
                 <button
                   onClick={() => fileInputRef.current?.click()}
@@ -356,11 +434,23 @@ export default function ImportPage() {
               </div>
             )}
 
+            {pageWarning && (
+              <div className="flex items-start gap-2 rounded-input border border-amber-300 bg-amber-50 p-md">
+                <span className="material-symbols-outlined text-amber-600">info</span>
+                <p className="text-xs text-amber-800">{pageWarning}</p>
+              </div>
+            )}
+
             {transactions && (
               <>
                 <div className="flex items-center justify-between">
                   <p className="text-sm font-semibold text-primary">
                     {transactions.length} transaction{transactions.length === 1 ? "" : "s"} found
+                    {duplicateCount > 0 && (
+                      <span className="ml-1 font-normal text-on-surface-variant">
+                        ({duplicateCount} possible duplicate{duplicateCount === 1 ? "" : "s"}, unchecked)
+                      </span>
+                    )}
                   </p>
                   <div className="flex gap-3 text-xs font-semibold text-secondary">
                     <button onClick={() => selectAll(true)}>Select all</button>
@@ -392,12 +482,19 @@ export default function ImportPage() {
                         <p className="truncate text-sm font-medium text-primary">
                           {t.description}
                         </p>
-                        <p className="text-xs text-on-surface-variant">
-                          {new Date(t.date).toLocaleDateString("en-US", {
-                            day: "numeric",
-                            month: "short",
-                          })}
-                        </p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs text-on-surface-variant">
+                            {new Date(t.date).toLocaleDateString("en-US", {
+                              day: "numeric",
+                              month: "short",
+                            })}
+                          </p>
+                          {t.isDuplicate && (
+                            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                              Already in Receipts?
+                            </span>
+                          )}
+                        </div>
                       </div>
 
                       <button
@@ -422,6 +519,7 @@ export default function ImportPage() {
                     setPendingPdf(null);
                     setPdfPassword("");
                     setPdfPasswordError(null);
+                    setPageWarning(null);
                   }}
                   className="w-full text-center text-sm font-semibold text-on-surface-variant"
                 >

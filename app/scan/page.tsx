@@ -4,11 +4,14 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { normalizeToJpeg } from "@/lib/image";
 
+const REQUEST_TIMEOUT_MS = 45000; // fail cleanly instead of hanging forever
+
 export default function ScanPage() {
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [flashOn, setFlashOn] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -112,6 +115,10 @@ export default function ScanPage() {
   async function processImage(blob: Blob) {
     setProcessing(true);
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
     try {
       const formData = new FormData();
       formData.append("image", blob, "receipt.jpg");
@@ -119,6 +126,7 @@ export default function ScanPage() {
       const res = await fetch("/api/ocr", {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       });
 
       const data = await res.json().catch(() => null);
@@ -137,11 +145,21 @@ export default function ScanPage() {
       router.push("/receipts/new");
     } catch (err: any) {
       const message =
-        err?.message ||
-        "Couldn't reach the scanning service. Check your connection and try again.";
+        err?.name === "AbortError"
+          ? "That took too long to respond. Check your connection and try again."
+          : err?.message ||
+            "Couldn't reach the scanning service. Check your connection and try again.";
       alert(message);
       setProcessing(false);
+    } finally {
+      clearTimeout(timeoutId);
+      abortControllerRef.current = null;
     }
+  }
+
+  function cancelProcessing() {
+    abortControllerRef.current?.abort();
+    setProcessing(false);
   }
 
   return (
@@ -231,9 +249,15 @@ export default function ScanPage() {
       </div>
 
       {processing && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70">
+        <div className="absolute inset-0 z-[60] flex flex-col items-center justify-center gap-4 bg-black/70">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/30 border-t-white" />
           <p className="text-sm text-white/80">Reading receipt...</p>
+          <button
+            onClick={cancelProcessing}
+            className="mt-2 rounded-full border border-white/30 px-4 py-2 text-sm font-semibold text-white active:bg-white/10"
+          >
+            Cancel
+          </button>
         </div>
       )}
     </div>
